@@ -334,65 +334,42 @@ from torchvision.models import ResNet18_Weights, ViT_B_32_Weights
 import timm
 from torchvision import models
 
-class AdaptiveFeatureFusion(nn.Module):
-    """Adaptive Feature Fusion Module using attention weights to enhance feature integration."""
-    def __init__(self, feature_dim):
-        super(AdaptiveFeatureFusion, self).__init__()
-        self.gate = nn.Sequential(
-            nn.Linear(feature_dim, feature_dim),
-            nn.Sigmoid()
-        )
-    
-    def forward(self, features_cnn, features_vit, attention_weights):
-        # Simplified to use mean of attention weights for gating
-        attention_mean = attention_weights.mean(dim=1, keepdim=True)
-        gated_weights = self.gate(attention_mean)
-        combined_features = features_cnn * gated_weights + features_vit * (1 - gated_weights)
-        return combined_features
+class ViTFeatureExtractor(nn.Module):
+    def __init__(self, model_name='vit_base_patch32_224', pretrained=True):
+        super(ViTFeatureExtractor, self).__init__()
+        self.model = timm.create_model(model_name, pretrained=pretrained, num_classes=0)
+        self.model.head = nn.Identity()  # Removing the classification head
 
-class AdaptiveFeatureFusion(nn.Module):
-    """Adaptive Feature Fusion Module using attention weights to enhance feature integration."""
-    def __init__(self, feature_dim):
-        super(AdaptiveFeatureFusion, self).__init__()
-        self.gate = nn.Sequential(
-            nn.Linear(feature_dim, feature_dim),
-            nn.Sigmoid()
-        )
-    
-    def forward(self, features_cnn, features_vit, attention_weights):
-        attention_mean = attention_weights.mean(dim=1, keepdim=True)
-        gated_weights = self.gate(attention_mean)
-        combined_features = features_cnn * gated_weights + features_vit * (1 - gated_weights)
-        return combined_features
+    def forward(self, x):
+        features = self.model.forward_features(x)  # Get features before the head
+        if features.dim() == 3:  # If features are in (B, C, H, W) format
+            features = features.flatten(start_dim=1)  # Flatten from (B, C, H, W) to (B, C*H*W)
+        return features
 
-class EnhancedCNNViT_AFF(nn.Module):
-    """Enhanced model combining ResNet and Vision Transformer with adaptive feature fusion."""
+class EnhancedCNNViT(nn.Module):
     def __init__(self, num_classes):
-        super(EnhancedCNNViT_AFF, self).__init__()
-        self.resnet = models.resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
-        resnet_features_dim = self.resnet.fc.in_features  # Store the number of output features from ResNet
+        super(EnhancedCNNViT, self).__init__()
+        self.resnet = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
         self.resnet.fc = nn.Identity()  # Use as a feature extractor
 
-        self.vit = timm.create_model('vit_base_patch32_224', pretrained=True)
-        self.vit.head = nn.Identity()  # Remove the classification head to use as a feature extractor
-        vit_features_dim = self.vit.head.in_features  # Store the number of output features from ViT
+        self.vit = ViTFeatureExtractor(pretrained=True)
 
-        self.feature_fusion = AdaptiveFeatureFusion(vit_features_dim)  # Assuming the feature dimension needed is from ViT
+        # Correct the combined feature dimension
+        combined_feature_dim = 512 + 38400  # 512 from ResNet and 38400 from ViT
+
         self.classifier = nn.Sequential(
-            nn.Linear(resnet_features_dim + vit_features_dim, 512),  # Combine dimensions from ResNet and ViT
+            nn.Linear(combined_feature_dim, 512),  # Adjust this to the correct combined dimension
             nn.ReLU(),
             nn.Linear(512, num_classes),
-            nn.Sigmoid()
+            nn.Sigmoid()  # Assuming multi-label classification
         )
 
     def forward(self, x):
-        resnet_features = self.resnet(x)
-        vit_features = self.vit(x)  # No attention weights needed explicitly unless further processing is intended
-        
-        combined_features = self.feature_fusion(resnet_features, vit_features)
+        res_features = self.resnet(x)  # (B, 512)
+        vit_features = self.vit(x)  # (B, 38400), assuming 50*768=38400
+        combined_features = torch.cat((res_features, vit_features), dim=1)  # Concatenate features
         output = self.classifier(combined_features)
         return output
-
 
 
 # Example usage
@@ -539,21 +516,26 @@ img_width = img_width = 224
 num_classes = 9  # Ensure this matches with the range of labels generated
 
 # Model instantiation
-model = EnhancedCNNViT_AFF(num_classes=num_classes)
+model = EnhancedCNNViT(num_classes=num_classes)
 
 # Optimizer and loss function setup
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-criterion = torch.nn.NLLLoss()  # Compatible with LogSoftmax
+criterion = torch.nn.BCEWithLogitsLoss()
 
-# Example usage: Training function
-def train(model, criterion, optimizer, num_epochs=3):
+def train(model, criterion, optimizer, num_epochs=3, device='cpu'):
+    model.train()  # Set the model to training mode
     for epoch in range(num_epochs):
-        images = torch.randn(batch_size, img_channels, img_height, img_width)
-        labels = torch.randint(0, num_classes, (batch_size,))
-        optimizer.zero_grad()
-        outputs = model(images)
-        loss.backward()
-        optimizer.step()
+        # Generate synthetic images and labels
+        images = torch.randn(batch_size, img_channels, img_height, img_width).to(device)
+        # Generate random multi-labels (multi-label classification setup)
+        labels = torch.randint(0, 2, (batch_size, num_classes)).float().to(device)
+
+        optimizer.zero_grad()  # Clear gradients before calculating new ones
+        outputs = model(images)  # Forward pass
+        loss = criterion(outputs, labels)  # Compute loss
+        loss.backward()  # Backpropagate the loss
+        optimizer.step()  # Update model parameters
+
         print(f"Epoch {epoch+1}, Loss: {loss.item()}")
 
 # Run the training
